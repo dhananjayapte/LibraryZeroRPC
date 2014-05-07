@@ -27,6 +27,7 @@ import javax.ws.rs.core.Request;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.UriInfo;
 
+import edu.sjsu.cmpe.library.config.ConstantUtil;
 import edu.sjsu.cmpe.library.domain.CommandWrapper;
 
 import org.eclipse.jetty.server.HttpInput;
@@ -58,7 +59,7 @@ import edu.sjsu.cmpe.library.repository.BookRepositoryInterface;
 @Message
 public class BookResource {
     /** bookRepository instance */
-    private final BookRepositoryInterface bookRepository;
+    //private final BookRepositoryInterface bookRepository;
     ZMQ.Context context = null;
 	ZMQ.Socket socket = null;
 
@@ -76,7 +77,35 @@ public class BookResource {
      *            a BookRepository instance
      */
     public BookResource(BookRepositoryInterface bookRepository) {
-	this.bookRepository = bookRepository;
+	//this.bookRepository = bookRepository;
+	
+	this.initializeHashMap();
+    }
+    
+    public void initializeHashMap(){
+    	//connect to server
+    	this.connect("tcp://"+ ConstantUtil.SERVER_ADDRESS +":4242");
+    	
+    	//send to server and initialize HashMap
+    	ByteArrayOutputStream out = new ByteArrayOutputStream();
+    	final MessagePack msgpack = new MessagePack();
+    	Packer packer = msgpack.createPacker(out);
+    	byte raw[] = null;
+		try {
+			raw = msgpack.write(new ConcurrentHashMap<Long, Book>());
+			Value mapVal = msgpack.read(raw);
+			Value values[] = new Value[1];
+			values[0] = mapVal;
+			
+			//Book bookChck = msgpack.read(raw, Book.class);
+			System.out.println("in book resource--- inside intialize map");
+			
+			packer.write(new CommandWrapper("createLibraryHashMap", values));
+	        this.socket.send(out.toByteArray(), 0);
+	        System.out.println("End of method: SendToServer");
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
     }
 
     @GET
@@ -86,17 +115,48 @@ public class BookResource {
     		@Context HttpHeaders headers){
     	BookDto bookResponse = getBookByIsbn(isbn);
     	Book book = bookResponse.getBook();
+    	System.out.println("Book is retrieved using getBookByIsbn--->"+book.getTitle());
     	
     	if(headers.getRequestHeader(headers.IF_MODIFIED_SINCE)!=null){
     		Date newDate = new Date(headers.getRequestHeader(headers.IF_MODIFIED_SINCE).get(0).toString());
-    		ConcurrentHashMap<Long, Date> dateInMemoryMap = bookRepository.getDateInMemoryMap();
+    		ConcurrentHashMap<Long, Date> dateInMemoryMap = null; //bookRepository.getDateInMemoryMap();
+    		//connect to server
+        	this.connect("tcp://"+ ConstantUtil.SERVER_ADDRESS +":4242");
+        	
+        	//send to server and initialize HashMap
+        	ByteArrayOutputStream out = new ByteArrayOutputStream();
+        	final MessagePack msgpack = new MessagePack();
+        	Packer packer = msgpack.createPacker(out);
+    		try {
+    			packer.write(new CommandWrapper("getDateInMemoryMap", null));
+    	        this.socket.send(out.toByteArray(), 0);
+    	        
+    	        //listen ton server to get the Map
+    	        dateInMemoryMap = getMapFromServer();
+    		}catch(Exception e){
+    			e.printStackTrace();
+    		}
     		if(dateInMemoryMap.contains(isbn.get())){
     			Date anotherDate = dateInMemoryMap.get(isbn.get());
     			if(newDate.compareTo(anotherDate)==0){
     				return Response.status(304).entity("Not Modified").build();
     			}
     		}else{
-    			bookRepository.setDateInMemoryMap(isbn.get(), newDate);
+    			try {
+        			byte[] rawIsbn = msgpack.write(isbn.get());
+        			byte[] rawDate = msgpack.write(newDate);
+
+        			Value values[] = new Value[2];
+        			values[0] = msgpack.read(rawIsbn);
+        			values[1] = msgpack.read(rawDate);
+        			
+        			//bookRepository.setDateInMemoryMap(isbn.get(), newDate);
+        			packer.write(new CommandWrapper("setDateInMemoryMap", values));
+        	        this.socket.send(out.toByteArray(), 0);
+        	        
+        		}catch(Exception e){
+        			e.printStackTrace();
+        		}
     		}
     	}
     	
@@ -133,9 +193,51 @@ public class BookResource {
 		
 		return Response.status(200).entity(displayMap).build();
     }
+    
+    private ConcurrentHashMap<Long, Date> getMapFromServer() throws IOException {
+		//listen to ZeroRPC server to get the reply from server
+		MessagePack packer = new MessagePack();
+		byte[] response = this.socket.recv(0);
+		ConcurrentHashMap<Long, Date> dateInMemoryMap =  packer.createUnpacker(new ByteArrayInputStream(response)).read(new ConcurrentHashMap<Long, Date> ());
+		return dateInMemoryMap;
+	}
+    
    
     public BookDto getBookByIsbn(@PathParam("isbn") LongParam isbn) {
-		Book book = bookRepository.getBookByISBN(isbn.get());
+		//Book book = bookRepository.getBookByISBN(isbn.get());
+    	Book book = null;
+    	
+		//connect to server
+    	this.connect("tcp://"+ ConstantUtil.SERVER_ADDRESS +":4242");
+    	//retrieve the isbn value
+    	Long isbnValue = isbn.get();
+    	
+    	final ByteArrayOutputStream out = new ByteArrayOutputStream();
+		final MessagePack msgpack = new MessagePack();
+		Packer packer = msgpack.createPacker(out);
+		
+		//send the value to ZRPC server
+		byte raw[] = null;
+		try {
+			raw = msgpack.write(isbnValue);
+			Value val = msgpack.read(raw);
+			Value values[] = new Value[1];
+			values[0] = val;
+			
+			//System.out.println("in library check b4 send::"+bookChck.getTitle());
+			
+			packer.write(new CommandWrapper("getBookByIsbn", values));
+	        this.socket.send(out.toByteArray(), 0);
+	        System.out.println("End of method: SendToServer");
+	        
+	        //listen to ZRPC Server and get the value
+			book = listenToServer();
+			
+		}catch(Exception e){
+			e.printStackTrace();
+		}
+		
+		
 		BookDto bookResponse = new BookDto(book);
 		bookResponse.addLink(new LinkDto("view-book", "/books/" + book.getIsbn(), "GET"));
 		bookResponse.addLink(new LinkDto("update-book", "/books/" + book.getIsbn(), "PUT"));
@@ -172,50 +274,50 @@ public class BookResource {
     		}
     	}
     	
-    	/*Book bookObj = new Book();
-    	bookObj.setAuthorList(request.getAuthorList());
-    	bookObj.setIsbn(request.getIsbn());
-    	bookObj.setLanguage(request.getLanguage());
-    	bookObj.setNum_pages(request.getNum_pages());
-    	bookObj.setPublication_date(request.getPublication_date());
-    	bookObj.setReviewList(request.getReviewList());
-    	bookObj.setTitle(request.getTitle());
-    	bookObj.setStatus(request.getStatus());*/
-    	
     	System.out.println("Inside create book!!");
-    	this.connect("tcp://localhost:4242");
+    	//connect to server
+    	this.connect("tcp://"+ ConstantUtil.SERVER_ADDRESS +":4242");
     	//pack the book object using msg packer
+    	// Store the new book in the BookRepository so that we can retrieve it.
     	this.sendToServer("saveBook", request);
     	
-		// Store the new book in the BookRepository so that we can retrieve it.
 		//Book savedBook = bookRepository.saveBook(request);
 	
-		//send save book request to ZeroRPC server
-		MessagePack packer = new MessagePack();
-		byte[] response = this.socket.recv(0);
-		Book savedBook =  packer.createUnpacker(
-		new ByteArrayInputStream(response)).read(new Book());
+		Book savedBook = listenToServer();
 		
+		BookDto bookResponse = null;
 		//extract the links to create a response and send back the response
-		
-		String location = "/books/" + savedBook.getIsbn();
-		BookDto bookResponse = new BookDto(savedBook);
-		bookResponse.addLink(new LinkDto("view-book", location, "GET"));
-		bookResponse.addLink(new LinkDto("update-book", location, "PUT"));
-		
-		// Add other links if needed
-		bookResponse.addLink(new LinkDto("delete-book", location, "DELETE"));
-		bookResponse.addLink(new LinkDto("create-review", location + "/reviews", "POST"));
-		if(savedBook.getReviewList()!=null && !savedBook.getReviewList().isEmpty()){
-			bookResponse.addLink(new LinkDto("view-all-reviews", "/books/" + savedBook.getIsbn() + "/reviews", "GET"));
+		if(savedBook!=null){
+			String location = "/books/" + savedBook.getIsbn();
+			bookResponse = new BookDto(savedBook);
+			bookResponse.addLink(new LinkDto("view-book", location, "GET"));
+			bookResponse.addLink(new LinkDto("update-book", location, "PUT"));
+			
+			// Add other links if needed
+			bookResponse.addLink(new LinkDto("delete-book", location, "DELETE"));
+			bookResponse.addLink(new LinkDto("create-review", location + "/reviews", "POST"));
+			if(savedBook.getReviewList()!=null && !savedBook.getReviewList().isEmpty()){
+				bookResponse.addLink(new LinkDto("view-all-reviews", "/books/" + savedBook.getIsbn() + "/reviews", "GET"));
+			}
+			
+			/*Map<String, Object> resultMap = new HashMap<String, Object>();
+			resultMap.put("links", bookResponse.getLinks());*/
 		}
-		
-		/*Map<String, Object> resultMap = new HashMap<String, Object>();
-		resultMap.put("links", bookResponse.getLinks());*/
-		
 		return Response.status(201).entity(createDisplayMap(bookResponse)).build();
     }
-    
+
+	/**
+	 * @return
+	 * @throws IOException
+	 */
+	private Book listenToServer() throws IOException {
+		//listen to ZeroRPC server to get the reply from server
+		MessagePack packer = new MessagePack();
+		byte[] response = this.socket.recv(0);
+		Book savedBook =  packer.createUnpacker(new ByteArrayInputStream(response)).read(new Book());
+		return savedBook;
+	}
+	
     public void sendToServer(String methodName, Book bookTestObj){
     	System.out.println("Send to ZeroRPC Server");
     	final ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -232,7 +334,7 @@ public class BookResource {
 			Book bookChck = msgpack.read(raw, Book.class);
 			System.out.println("in library check b4 send::"+bookChck.getTitle());
 			
-			packer.write(new CommandWrapper(methodName, values, raw));
+			packer.write(new CommandWrapper(methodName, values));
 	        this.socket.send(out.toByteArray(), 0);
 	        System.out.println("End of method: SendToServer");
 		} catch (IOException e) {
@@ -244,11 +346,49 @@ public class BookResource {
     @Path("/{isbn}")
     @Timed(name = "delete-book")
     public Response deleteBook(@PathParam("isbn") LongParam isbn){
-    	bookRepository.deleteBook(isbn.get());
+    	//bookRepository.deleteBook(isbn.get());
+    	performActionByIsbn(isbn.get(), "deleteBook");
     	BookDto bookResponse = new BookDto();
 		bookResponse.addLink(new LinkDto("create-book", "/books", "POST"));
 	
     	return Response.status(200).entity(createDisplayMap(bookResponse)).build();
+    }
+    /**
+     * This method will perform the specified action i.e. it will send 
+     * a Request to ZRPC server to execute the specified method
+     * @param isbn
+     * @param methodName
+     */
+    private void performActionByIsbn(Long isbn, String methodName){
+		//connect to server
+    	this.connect("tcp://"+ ConstantUtil.SERVER_ADDRESS +":4242");
+    	//retrieve the isbn value
+    	Long isbnValue = isbn;
+    	
+    	final ByteArrayOutputStream out = new ByteArrayOutputStream();
+		final MessagePack msgpack = new MessagePack();
+		Packer packer = msgpack.createPacker(out);
+		
+		//send the value to ZRPC server
+		byte raw[] = null;
+		try {
+			raw = msgpack.write(isbnValue);
+			Value val = msgpack.read(raw);
+			Value values[] = new Value[1];
+			values[0] = val;
+			
+			//System.out.println("in library check b4 send::"+bookChck.getTitle());
+			
+			packer.write(new CommandWrapper(methodName, values));
+	        this.socket.send(out.toByteArray(), 0);
+	        System.out.println("End of method perform "+ methodName);
+	        
+	        //listen to ZRPC Server and get the value
+			//book = listenToServer();
+			
+		}catch(Exception e){
+			e.printStackTrace();
+		}
     }
     
     /**
@@ -274,7 +414,40 @@ public class BookResource {
     	}else{
     		status.toLowerCase();
     	}
-    	Book updatedBook = bookRepository.updateBook(isbn.get(),status);
+    	
+    	System.out.println("Send to ZeroRPC Server");
+    	final ByteArrayOutputStream out = new ByteArrayOutputStream();
+		final MessagePack msgpack = new MessagePack();
+		Packer packer = msgpack.createPacker(out);
+
+		Book updatedBook = null;
+		byte rawIsbn[] = null;
+		byte rawStatus[] = null;
+		try {
+			rawIsbn = msgpack.write(isbn.get());
+			rawStatus = msgpack.write(status);
+			Value isbnVal = msgpack.read(rawIsbn);
+			Value statusVal = msgpack.read(rawStatus);
+			Value values[] = new Value[2];
+			values[0] = isbnVal;
+			values[1] = statusVal;
+			
+			//send request to ZRPC server
+			//connect to server
+	    	this.connect("tcp://"+ ConstantUtil.SERVER_ADDRESS +":4242");
+	    	//pack the book object using msg packer
+	    	packer.write(new CommandWrapper("updateBookByIsbn", values));
+	        this.socket.send(out.toByteArray(), 0);
+	        System.out.println("updateBookByIsn Sent to Server");
+			
+			//Listen to server
+			updatedBook = listenToServer();
+		}catch(Exception e){
+			e.printStackTrace();
+		}
+    	
+    	//Book updatedBook = bookRepository.updateBook(isbn.get(),status);
+		
     	//update the links 
 		BookDto bookResponse = new BookDto(updatedBook);
 		bookResponse.addLink(new LinkDto("view-book", "/books/" + updatedBook.getIsbn(), "GET"));
@@ -304,7 +477,7 @@ public class BookResource {
 		Value mapVal = msgpack.read(raw);
 		Value values[] = new Value[1];
 		values[0] = mapVal;
-		packer.write(new CommandWrapper(methodName, values, null));
+		packer.write(new CommandWrapper(methodName, values));
         this.socket.send(out.toByteArray(), 0);
 		
 		//receive from server
